@@ -319,3 +319,204 @@ async function executeInline(id) {
 function escapeHtml(s) { return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
 fetchApprovals();
+
+// ===========================================================================
+// Settings sidebar
+// ===========================================================================
+
+const SETTING_FIELDS = [
+  'app_env', 'app_host', 'app_port',
+  'proxmox_url', 'proxmox_host_ip', 'proxmox_port', 'proxmox_realm',
+  'proxmox_user', 'proxmox_token_id', 'proxmox_token_secret', 'proxmox_verify_ssl',
+  'ollama_url', 'ollama_model',
+  'qdrant_url', 'qdrant_api_key', 'qdrant_current_collection_name', 'qdrant_history_collection_name',
+  'loki_url', 'prometheus_url',
+  'approval_db_path',
+];
+
+function settingsEl(id) {
+  return document.getElementById('cfg_' + id);
+}
+
+async function loadSettings() {
+  try {
+    const data = await api('/settings');
+    for (const field of SETTING_FIELDS) {
+      const el = settingsEl(field);
+      if (!el) continue;
+      const val = data[field];
+      if (val === null || val === undefined) continue;
+      if (el.type === 'checkbox') {
+        el.checked = !!val;
+      } else {
+        el.value = String(val);
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to load settings', e);
+    showSettingsMsg('Failed to load settings: ' + e.message, 'err');
+  }
+}
+
+async function saveSettings() {
+  const payload = {};
+  for (const field of SETTING_FIELDS) {
+    const el = settingsEl(field);
+    if (!el) continue;
+    if (el.type === 'checkbox') {
+      payload[field] = el.checked;
+    } else if (el.type === 'number') {
+      const num = parseInt(el.value, 10);
+      if (!isNaN(num)) payload[field] = num;
+    } else {
+      if (el.value.trim() !== '') payload[field] = el.value.trim();
+    }
+  }
+
+  try {
+    const res = await api('/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    showSettingsMsg(res.message || 'Settings saved.', 'ok');
+  } catch (e) {
+    showSettingsMsg('Save failed: ' + e.message, 'err');
+  }
+}
+
+function showSettingsMsg(text, type) {
+  const msgEl = document.getElementById('settings_msg');
+  if (!msgEl) return;
+  msgEl.textContent = text;
+  msgEl.className = 'sidebar-msg ' + (type === 'ok' ? 'ok' : type === 'err' ? 'err' : '');
+}
+
+function resetSettingsForm() {
+  loadSettings();
+  showSettingsMsg('Form reset to current values.', '');
+}
+
+// ===========================================================================
+// Tab switching
+// ===========================================================================
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    btn.classList.add('active');
+    const tabId = btn.getAttribute('data-tab');
+    const tabEl = document.getElementById(tabId);
+    if (tabEl) tabEl.classList.add('active');
+  });
+});
+
+// ===========================================================================
+// Sidebar open/close
+// ===========================================================================
+const sidebar = document.getElementById('settings_sidebar');
+const toggleBtn = document.getElementById('settings_toggle');
+const closeBtn = document.getElementById('settings_close');
+
+function openSidebar() {
+  sidebar.classList.remove('collapsed');
+  document.body.classList.remove('sidebar-collapsed');
+}
+
+function closeSidebar() {
+  sidebar.classList.add('collapsed');
+  document.body.classList.add('sidebar-collapsed');
+}
+
+if (toggleBtn) toggleBtn.addEventListener('click', openSidebar);
+if (closeBtn) closeBtn.addEventListener('click', closeSidebar);
+
+// Save / Reset buttons
+document.getElementById('settings_save').addEventListener('click', saveSettings);
+document.getElementById('settings_reset').addEventListener('click', resetSettingsForm);
+
+// ===========================================================================
+// Containers tab
+// ===========================================================================
+function statusClass(status) {
+  const s = (status || '').toLowerCase();
+  if (s === 'running') return 'running';
+  if (s === 'stopped') return 'stopped';
+  return 'other';
+}
+
+function renderContainerItem(c) {
+  const div = document.createElement('div');
+  div.className = 'container-item';
+  const statusCls = statusClass(c.status);
+  div.innerHTML = `
+    <div class="c-name">${escapeHtml(c.name || 'unknown')} <span class="c-status ${statusCls}">${escapeHtml(c.status || '?')}</span></div>
+    <div class="c-meta">
+      <span>ID: ${c.vmid ?? '—'}</span>
+      <span>Type: ${escapeHtml(c.type || '—')}</span>
+      <span>Node: ${escapeHtml(c.node || '—')}</span>
+      ${c.ip ? `<span>IP: ${escapeHtml(c.ip)}</span>` : ''}
+      ${c.hostname ? `<span>Host: ${escapeHtml(c.hostname)}</span>` : ''}
+    </div>
+  `;
+  return div;
+}
+
+async function loadContainers() {
+  const listEl = document.getElementById('container_list');
+  const countEl = document.getElementById('container_count');
+  listEl.innerHTML = '<div style="color:#888;font-size:12px">Loading…</div>';
+  try {
+    const containers = await api('/containers');
+    if (!Array.isArray(containers) || containers.length === 0) {
+      listEl.innerHTML = '<div style="color:#888;font-size:12px">No containers found. Try scanning.</div>';
+      countEl.textContent = '';
+      return;
+    }
+    countEl.textContent = `${containers.length} container${containers.length !== 1 ? 's' : ''} discovered`;
+    listEl.innerHTML = '';
+    containers.forEach(c => listEl.appendChild(renderContainerItem(c)));
+  } catch (e) {
+    listEl.innerHTML = `<div style="color:#f44336;font-size:12px">Error: ${escapeHtml(e.message)}</div>`;
+    countEl.textContent = '';
+  }
+}
+
+async function scanContainers() {
+  const btn = document.getElementById('container_scan_btn');
+  const listEl = document.getElementById('container_list');
+  const countEl = document.getElementById('container_count');
+  btn.disabled = true;
+  btn.textContent = '⏳ Scanning…';
+  listEl.innerHTML = '<div style="color:#888;font-size:12px">Scanning Proxmox…</div>';
+  countEl.textContent = '';
+  try {
+    const result = await api('/scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    if (result && result.containers && result.containers.length > 0) {
+      countEl.textContent = `${result.containers.length} container${result.containers.length !== 1 ? 's' : ''} found · scanned ${result.scanned_nodes || 0} node(s)`;
+      listEl.innerHTML = '';
+      result.containers.forEach(c => listEl.appendChild(renderContainerItem(c)));
+    } else {
+      listEl.innerHTML = '<div style="color:#888;font-size:12px">No containers returned from scan.</div>';
+      countEl.textContent = '';
+    }
+  } catch (e) {
+    listEl.innerHTML = `<div style="color:#f44336;font-size:12px">Scan failed: ${escapeHtml(e.message)}</div>`;
+    countEl.textContent = '';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔄 Scan Now';
+  }
+}
+
+document.getElementById('container_scan_btn').addEventListener('click', scanContainers);
+
+// Auto-load containers when switching to that tab
+document.querySelector('[data-tab="tab_containers"]').addEventListener('click', () => {
+  loadContainers();
+});
+
+// ===========================================================================
+// Init
+// ===========================================================================
+loadSettings();

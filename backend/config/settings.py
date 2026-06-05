@@ -62,8 +62,9 @@ class Settings(BaseSettings):
                 parsed = urlparse(host_ip)
                 host_ip = parsed.netloc or parsed.path
             host_ip = host_ip.rstrip("/")
-            scheme = "https" if self.proxmox_verify_ssl else "http"
-            return f"{scheme}://{host_ip}:{self.proxmox_port}"
+            # Proxmox always serves HTTPS on the API port; verify_ssl only
+            # controls whether the TLS certificate is validated, not the scheme.
+            return f"https://{host_ip}:{self.proxmox_port}"
         if self.proxmox_url:
             parsed = urlparse(self.proxmox_url)
             if parsed.scheme and parsed.netloc:

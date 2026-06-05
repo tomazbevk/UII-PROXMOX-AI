@@ -1,7 +1,9 @@
 import logging
 import json
+import os
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, List
 
 from fastapi import APIRouter, HTTPException
@@ -38,6 +40,9 @@ from .models import (
     ApprovalItem,
     ExecuteRequest,
     ExecutionResult,
+    SettingsResponse,
+    SettingsUpdateRequest,
+    SettingsSavedResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -126,7 +131,7 @@ def list_containers():
         return [Container(**c) for c in containers]
     except Exception as exc:
         logger.error(f"Failed to fetch containers: {exc}")
-        raise HTTPException(status_code=500, detail="Failed to fetch containers from Proxmox")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch containers from Proxmox: {exc}")
     return []
 
 
@@ -218,6 +223,25 @@ def get_infrastructure_summary():
         raise HTTPException(status_code=500, detail="Failed to fetch infrastructure summary")
 
 
+@router.get("/debug/proxmox")
+def debug_proxmox():
+    """Debug endpoint to test Proxmox connectivity."""
+    import traceback
+    settings = get_settings()
+    try:
+        client = ProxmoxClient(settings)
+        base_url = client.base_url
+        verify = client.session.verify
+        auth = client.session.headers.get("Authorization", "")[:60] + "..."
+        try:
+            nodes = client.get_nodes()
+            return {"ok": True, "base_url": base_url, "verify_ssl": verify, "auth_header": auth, "nodes": nodes}
+        except Exception as e:
+            return {"ok": False, "base_url": base_url, "verify_ssl": verify, "auth_header": auth, "error": str(e), "traceback": traceback.format_exc()}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "traceback": traceback.format_exc()}
+
+
 @router.post("/scan", response_model=ScanResult)
 def scan_infrastructure():
     settings = get_settings()
@@ -246,7 +270,7 @@ def scan_infrastructure():
         )
     except Exception as exc:
         logger.error(f"Failed to scan infrastructure: {exc}")
-        raise HTTPException(status_code=500, detail="Failed to scan infrastructure")
+        raise HTTPException(status_code=500, detail=f"Failed to scan infrastructure: {exc}")
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -961,3 +985,192 @@ def execute_direct(request: ExecuteRequest):
     except Exception as exc:
         logger.error(f"Direct execution failed: {exc}")
         raise HTTPException(status_code=500, detail="Direct execution failed")
+
+
+@router.get("/settings", response_model=SettingsResponse)
+def get_current_settings():
+    """Return current non-sensitive configuration."""
+    s = get_settings()
+    return SettingsResponse(
+        app_env=s.app_env,
+        app_host=s.app_host,
+        app_port=s.app_port,
+        proxmox_url=s.proxmox_url,
+        proxmox_host_ip=s.proxmox_host_ip,
+        proxmox_ip=s.proxmox_ip,
+        proxmox_node=s.proxmox_node,
+        proxmox_port=s.proxmox_port,
+        proxmox_realm=s.proxmox_realm,
+        proxmox_user=s.proxmox_user,
+        proxmox_token_id=s.proxmox_token_id,
+        proxmox_verify_ssl=s.proxmox_verify_ssl,
+        qdrant_url=s.qdrant_url,
+        qdrant_api_key=s.qdrant_api_key,
+        qdrant_current_collection_name=s.qdrant_current_collection_name,
+        qdrant_history_collection_name=s.qdrant_history_collection_name,
+        ollama_url=s.ollama_url,
+        ollama_model=s.ollama_model,
+        loki_url=s.loki_url,
+        prometheus_url=s.prometheus_url,
+        approval_db_path=s.approval_db_path,
+    )
+
+
+@router.patch("/settings", response_model=SettingsSavedResponse)
+def update_settings(payload: SettingsUpdateRequest):
+    """Update .env file with provided values. Server restart required for changes to take effect."""
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+
+    # Read current .env
+    env = _read_env_file(env_path)
+
+    updated_fields: list[str] = []
+    for field_name, value in payload.model_dump(exclude_none=True).items():
+        env_key = _ENV_VAR_MAP.get(field_name)
+        if env_key is None:
+            continue
+        str_value = str(value) if not isinstance(value, bool) else str(value).lower()
+        env[env_key] = str_value
+        updated_fields.append(field_name)
+
+    if not updated_fields:
+        return SettingsSavedResponse(saved=False, message="No fields provided to update.")
+
+    _write_env_file(env_path, env)
+
+    return SettingsSavedResponse(
+        saved=True,
+        message=f"Updated {len(updated_fields)} field(s): {', '.join(updated_fields)}. Restart the server for changes to take effect.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Settings endpoints
+# ---------------------------------------------------------------------------
+
+_ENV_VAR_MAP: dict[str, str] = {
+    "app_env": "APP_ENV",
+    "app_host": "APP_HOST",
+    "app_port": "APP_PORT",
+    "proxmox_url": "PROXMOX_URL",
+    "proxmox_host_ip": "PROXMOX_HOST_IP",
+    "proxmox_ip": "PROXMOX_IP",
+    "proxmox_node": "PROXMOX_NODE",
+    "proxmox_port": "PROXMOX_PORT",
+    "proxmox_realm": "PROXMOX_REALM",
+    "proxmox_user": "PROXMOX_USER",
+    "proxmox_token_id": "PROXMOX_TOKEN_ID",
+    "proxmox_token_secret": "PROXMOX_TOKEN_SECRET",
+    "proxmox_password": "PROXMOX_PASSWORD",
+    "proxmox_verify_ssl": "PROXMOX_VERIFY_SSL",
+    "qdrant_url": "QDRANT_URL",
+    "qdrant_api_key": "QDRANT_API_KEY",
+    "qdrant_current_collection_name": "QDRANT_CURRENT_COLLECTION_NAME",
+    "qdrant_history_collection_name": "QDRANT_HISTORY_COLLECTION_NAME",
+    "ollama_url": "OLLAMA_URL",
+    "ollama_model": "OLLAMA_MODEL",
+    "loki_url": "LOKI_URL",
+    "prometheus_url": "PROMETHEUS_URL",
+    "approval_db_path": "APPROVAL_DB_PATH",
+}
+
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    """Read a .env file into a flat {KEY: value} dict (ignores comments / blanks)."""
+    env: dict[str, str] = {}
+    if not path.is_file():
+        return env
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        env[key.strip()] = value.strip()
+    return env
+
+
+def _write_env_file(path: Path, env: dict[str, str]) -> None:
+    """Write a flat {KEY: value} dict back to a .env file, preserving comments."""
+    lines: list[str] = []
+    if path.is_file():
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                lines.append(raw_line)
+                continue
+            key, _, _ = stripped.partition("=")
+            key = key.strip()
+            if key in env:
+                lines.append(f"{key}={env[key]}")
+                del env[key]
+            else:
+                lines.append(raw_line)
+    # Append any new keys that weren't in the original file
+    for key, value in env.items():
+        lines.append(f"{key}={value}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@router.get("/settings", response_model=SettingsResponse)
+def get_current_settings():
+    """Return current non-sensitive configuration."""
+    s = get_settings()
+    return SettingsResponse(
+        app_env=s.app_env,
+        app_host=s.app_host,
+        app_port=s.app_port,
+        proxmox_url=s.proxmox_url,
+        proxmox_host_ip=s.proxmox_host_ip,
+        proxmox_ip=s.proxmox_ip,
+        proxmox_node=s.proxmox_node,
+        proxmox_port=s.proxmox_port,
+        proxmox_realm=s.proxmox_realm,
+        proxmox_user=s.proxmox_user,
+        proxmox_token_id=s.proxmox_token_id,
+        proxmox_verify_ssl=s.proxmox_verify_ssl,
+        qdrant_url=s.qdrant_url,
+        qdrant_api_key=s.qdrant_api_key,
+        qdrant_current_collection_name=s.qdrant_current_collection_name,
+        qdrant_history_collection_name=s.qdrant_history_collection_name,
+        ollama_url=s.ollama_url,
+        ollama_model=s.ollama_model,
+        loki_url=s.loki_url,
+        prometheus_url=s.prometheus_url,
+        approval_db_path=s.approval_db_path,
+    )
+
+
+@router.patch("/settings", response_model=SettingsSavedResponse)
+def update_settings(payload: SettingsUpdateRequest):
+    """Update .env file with provided values. Changes apply immediately to current process."""
+    project_root = Path(__file__).resolve().parents[2]
+    env_path = project_root / ".env"
+
+    # Read current .env
+    env = _read_env_file(env_path)
+
+    updated_fields: list[str] = []
+    for field_name, value in payload.model_dump(exclude_none=True).items():
+        env_key = _ENV_VAR_MAP.get(field_name)
+        if env_key is None:
+            continue
+        str_value = str(value) if not isinstance(value, bool) else str(value).lower()
+        env[env_key] = str_value
+        # Also update os.environ so current process sees the change
+        os.environ[env_key] = str_value
+        updated_fields.append(field_name)
+
+    if not updated_fields:
+        return SettingsSavedResponse(saved=False, message="No fields provided to update.")
+
+    _write_env_file(env_path, env)
+
+    # Clear the settings cache so get_settings() returns fresh values
+    get_settings.cache_clear()
+
+    return SettingsSavedResponse(
+        saved=True,
+        message=f"Updated {len(updated_fields)} field(s): {', '.join(updated_fields)}. Changes applied immediately.",
+    )

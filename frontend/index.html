@@ -5,21 +5,198 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>AI Stack — Approvals</title>
     <style>
-      body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:20px}
-      
+      *{box-sizing:border-box}
+      body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;display:flex;height:100vh;overflow:hidden}
+
+      /* Sidebar */
+      #settings_sidebar{width:360px;min-width:360px;background:#1a1a2e;color:#e0e0e0;display:flex;flex-direction:column;border-right:1px solid #333;transition:margin-left 0.25s ease}
+      #settings_sidebar.collapsed{margin-left:-360px}
+      .sidebar-header{display:flex;align-items:center;justify-content:space-between;padding:0;border-bottom:1px solid #333}
+      .sidebar-tabs{display:flex;flex:1}
+      .sidebar-tabs .tab-btn{flex:1;padding:10px 6px;background:none;border:none;color:#888;cursor:pointer;font-size:13px;font-weight:600;border-bottom:2px solid transparent;transition:color 0.15s,border-color 0.15s}
+      .sidebar-tabs .tab-btn:hover{color:#ccc}
+      .sidebar-tabs .tab-btn.active{color:#fff;border-bottom-color:#0b6cff}
+      .sidebar-header button.close-btn{background:none;border:none;color:#aaa;cursor:pointer;font-size:18px;padding:2px 10px;border-radius:4px;align-self:center;margin-right:4px}
+      .sidebar-header button.close-btn:hover{color:#fff;background:#333}
+      .sidebar-body{flex:1;overflow-y:auto;padding:12px 16px}
+      .sidebar-body .sec-title{font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:#888;margin:14px 0 6px;font-weight:600}
+      .sidebar-body label{display:block;font-size:12px;color:#aaa;margin-bottom:3px}
+      .sidebar-body input,.sidebar-body select{width:100%;padding:6px 8px;background:#16213e;border:1px solid #333;border-radius:4px;color:#e0e0e0;font-size:13px;margin-bottom:8px}
+      .sidebar-body input:focus,.sidebar-body select:focus{outline:none;border-color:#0b6cff}
+      .sidebar-body .row{display:flex;gap:8px}
+      .sidebar-body .row>div{flex:1}
+      .sidebar-body .chk-row{display:flex;align-items:center;gap:6px;margin-bottom:8px}
+      .sidebar-body .chk-row input{width:auto;margin:0}
+      .sidebar-body .chk-row label{margin:0;font-size:13px;color:#ccc}
+      .sidebar-footer{padding:12px 16px;border-top:1px solid #333;display:flex;gap:8px}
+      .sidebar-footer button{flex:1;padding:8px;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600}
+      .btn-save{background:#0b6cff;color:#fff}
+      .btn-save:hover{background:#0958d0}
+      .btn-reset{background:#333;color:#ccc}
+      .btn-reset:hover{background:#444}
+      .btn-scan{background:#0b6cff;color:#fff}
+      .btn-scan:hover{background:#0958d0}
+      .btn-scan:disabled{background:#333;color:#666;cursor:not-allowed}
+      .sidebar-msg{font-size:12px;padding:6px 16px;min-height:28px}
+      .sidebar-msg.ok{color:#4caf50}
+      .sidebar-msg.err{color:#f44336}
+      .tab-content{display:none}
+      .tab-content.active{display:block}
+      /* Container list */
+      .container-item{background:#16213e;border:1px solid #333;border-radius:6px;padding:8px 10px;margin-bottom:6px;font-size:12px}
+      .container-item .c-name{font-weight:600;color:#fff;font-size:13px}
+      .container-item .c-meta{color:#888;margin-top:2px}
+      .container-item .c-meta span{margin-right:10px}
+      .container-item .c-status{display:inline-block;padding:1px 6px;border-radius:3px;font-size:11px;font-weight:600;margin-left:4px}
+      .c-status.running{background:#1b5e20;color:#4caf50}
+      .c-status.stopped{background:#4e3422;color:#ff8a65}
+      .c-status.other{background:#333;color:#999}
+      #container_list{max-height:calc(100vh - 200px);overflow-y:auto}
+      .container-count{color:#888;font-size:12px;margin-bottom:8px}
+
+      /* Toggle button (always visible) */
+      #settings_toggle{position:fixed;top:10px;left:10px;z-index:100;background:#1a1a2e;border:1px solid #333;color:#aaa;cursor:pointer;padding:6px 10px;border-radius:6px;font-size:16px;display:none}
+      #settings_toggle:hover{color:#fff;background:#333}
+      body.sidebar-collapsed #settings_toggle{display:block}
+
+      /* Main content */
+      #main{flex:1;display:flex;flex-direction:column;overflow:hidden;padding:16px 20px}
+      body.sidebar-collapsed #main{margin-left:36px}
+
       .card{border:1px solid #ddd;padding:12px;margin-bottom:8px;border-radius:6px}
       .btn{padding:6px 10px;margin-right:6px;border:none;border-radius:4px;cursor:pointer}
       .btn-primary{background:#0b6cff;color:#fff}
       .btn-danger{background:#e02424;color:#fff}
       .btn-secondary{background:#666;color:#fff}
       pre{background:#f6f8fa;padding:8px;border-radius:4px}
+      #chat_messages{flex:1;overflow:auto;margin-bottom:8px;background:#fff;padding:8px;border-radius:4px;border:1px solid #ddd}
     </style>
   </head>
   <body>
-    <div>
-      <h2>Chat</h2>
-      <div class="card" style="max-width:1100px">
-        <div id="chat_messages" style="height:420px;overflow:auto;margin-bottom:8px;background:#fff;padding:8px;border-radius:4px"></div>
+    <!-- Sidebar -->
+    <div id="settings_sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-tabs">
+          <button class="tab-btn active" data-tab="tab_settings">⚙ Settings</button>
+          <button class="tab-btn" data-tab="tab_containers">🖥 Containers</button>
+        </div>
+        <button id="settings_close" class="close-btn" title="Close sidebar">✕</button>
+      </div>
+
+      <!-- Settings Tab -->
+      <div class="sidebar-body tab-content active" id="tab_settings">
+        <div class="sec-title">General</div>
+        <label for="cfg_app_env">App Environment</label>
+        <select id="cfg_app_env">
+          <option value="development">development</option>
+          <option value="production">production</option>
+        </select>
+        <div class="row">
+          <div>
+            <label for="cfg_app_host">Host</label>
+            <input id="cfg_app_host" type="text" />
+          </div>
+          <div>
+            <label for="cfg_app_port">Port</label>
+            <input id="cfg_app_port" type="number" />
+          </div>
+        </div>
+
+        <div class="sec-title">Proxmox</div>
+        <label for="cfg_proxmox_url">Proxmox URL</label>
+        <input id="cfg_proxmox_url" type="text" placeholder="https://192.168.1.100:8006" />
+        <div class="row">
+          <div>
+            <label for="cfg_proxmox_host_ip">Host IP</label>
+            <input id="cfg_proxmox_host_ip" type="text" />
+          </div>
+          <div>
+            <label for="cfg_proxmox_port">Port</label>
+            <input id="cfg_proxmox_port" type="number" />
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="cfg_proxmox_realm">Realm</label>
+            <input id="cfg_proxmox_realm" type="text" />
+          </div>
+          <div>
+            <label for="cfg_proxmox_user">User</label>
+            <input id="cfg_proxmox_user" type="text" />
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="cfg_proxmox_token_id">Token ID</label>
+            <input id="cfg_proxmox_token_id" type="text" />
+          </div>
+          <div>
+            <label for="cfg_proxmox_token_secret">Token Secret</label>
+            <input id="cfg_proxmox_token_secret" type="password" />
+          </div>
+        </div>
+        <div class="chk-row">
+          <input id="cfg_proxmox_verify_ssl" type="checkbox" />
+          <label for="cfg_proxmox_verify_ssl">Verify SSL</label>
+        </div>
+
+        <div class="sec-title">Ollama</div>
+        <label for="cfg_ollama_url">Ollama URL</label>
+        <input id="cfg_ollama_url" type="text" placeholder="http://192.168.1.229:11434" />
+        <label for="cfg_ollama_model">Default Model</label>
+        <input id="cfg_ollama_model" type="text" placeholder="llama3.1:8b" />
+
+        <div class="sec-title">Qdrant</div>
+        <label for="cfg_qdrant_url">Qdrant URL</label>
+        <input id="cfg_qdrant_url" type="text" placeholder="http://192.168.1.150:6333" />
+        <label for="cfg_qdrant_api_key">API Key</label>
+        <input id="cfg_qdrant_api_key" type="password" />
+        <div class="row">
+          <div>
+            <label for="cfg_qdrant_current_collection_name">Current Collection</label>
+            <input id="cfg_qdrant_current_collection_name" type="text" />
+          </div>
+          <div>
+            <label for="cfg_qdrant_history_collection_name">History Collection</label>
+            <input id="cfg_qdrant_history_collection_name" type="text" />
+          </div>
+        </div>
+
+        <div class="sec-title">Loki</div>
+        <label for="cfg_loki_url">Loki URL</label>
+        <input id="cfg_loki_url" type="text" placeholder="http://192.168.1.150:3100" />
+
+        <div class="sec-title">Prometheus</div>
+        <label for="cfg_prometheus_url">Prometheus URL</label>
+        <input id="cfg_prometheus_url" type="text" placeholder="http://192.168.1.150:9090" />
+
+        <div class="sec-title">Other</div>
+        <label for="cfg_approval_db_path">Approval DB Path</label>
+        <input id="cfg_approval_db_path" type="text" />
+      </div>
+      <!-- Containers Tab -->
+      <div class="sidebar-body tab-content" id="tab_containers">
+        <div style="display:flex;gap:8px;margin-bottom:12px">
+          <button id="container_scan_btn" class="btn-scan" style="flex:1;padding:8px;font-size:13px;font-weight:600;border:none;border-radius:4px;cursor:pointer">🔄 Scan Now</button>
+        </div>
+        <div id="container_count" class="container-count"></div>
+        <div id="container_list"></div>
+      </div>
+      <div id="settings_msg" class="sidebar-msg"></div>
+      <div class="sidebar-footer">
+        <button id="settings_save" class="btn-save">Save</button>
+        <button id="settings_reset" class="btn-reset">Reset</button>
+      </div>
+    </div>
+
+    <!-- Toggle button (shown when sidebar is collapsed) -->
+    <button id="settings_toggle" title="Open settings">⚙</button>
+
+    <!-- Main content -->
+    <div id="main">
+      <h2 style="margin:0 0 10px">Chat</h2>
+      <div class="card" style="max-width:1100px;flex:1;display:flex;flex-direction:column">
+        <div id="chat_messages"></div>
         <div style="display:flex;gap:8px">
           <input id="chat_input" style="flex:1;padding:8px" placeholder="Ask the assistant about your homelab..." />
           <select id="model_select" style="width:160px;padding:6px;border-radius:4px">
@@ -28,10 +205,10 @@
           <button id="chat_send" class="btn btn-primary">Send</button>
         </div>
       </div>
+      <h3>Execution Output</h3>
+      <div id="output"><em>No output yet.</em></div>
     </div>
-    <h3>Execution Output</h3>
-    <div id="output"><em>No output yet.</em></div>
-    
+
     <script src="app.js"></script>
   </body>
 </html>

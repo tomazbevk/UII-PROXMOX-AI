@@ -161,3 +161,59 @@ class ExecutionResult(BaseModel):
     stdout: str
     stderr: str
     executed_at: datetime
+
+
+class SettingsResponse(BaseModel):
+    """Current non-sensitive configuration values."""
+    app_env: str = ""
+    app_host: str = "0.0.0.0"
+    app_port: int = 8000
+    proxmox_url: str = ""
+    proxmox_host_ip: str | None = None
+    proxmox_ip: str | None = None
+    proxmox_node: str | None = None
+    proxmox_port: int = 8006
+    proxmox_realm: str = "pve"
+    proxmox_user: str = "ai-stack"
+    proxmox_token_id: str = "assistant"
+    proxmox_verify_ssl: bool = False
+    qdrant_url: str = ""
+    qdrant_api_key: str = ""
+    qdrant_current_collection_name: str = "infrastructure_current"
+    qdrant_history_collection_name: str = "infrastructure_history"
+    ollama_url: str = ""
+    ollama_model: str = "llama3.1:8b"
+    loki_url: str = ""
+    prometheus_url: str = ""
+    approval_db_path: str = "data/approvals.sqlite3"
+
+
+class SettingsUpdateRequest(BaseModel):
+    """Fields that can be updated at runtime. Secrets are write-only."""
+    app_env: str | None = None
+    app_port: int | None = None
+    proxmox_url: str | None = None
+    proxmox_host_ip: str | None = None
+    proxmox_ip: str | None = None
+    proxmox_node: str | None = None
+    proxmox_port: int | None = None
+    proxmox_realm: str | None = None
+    proxmox_user: str | None = None
+    proxmox_token_id: str | None = None
+    proxmox_token_secret: str | None = None
+    proxmox_password: str | None = None
+    proxmox_verify_ssl: bool | None = None
+    qdrant_url: str | None = None
+    qdrant_api_key: str | None = None
+    qdrant_current_collection_name: str | None = None
+    qdrant_history_collection_name: str | None = None
+    ollama_url: str | None = None
+    ollama_model: str | None = None
+    loki_url: str | None = None
+    prometheus_url: str | None = None
+    approval_db_path: str | None = None
+
+
+class SettingsSavedResponse(BaseModel):
+    saved: bool
+    message: str
