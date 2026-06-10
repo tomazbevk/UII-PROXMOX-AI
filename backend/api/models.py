@@ -92,11 +92,17 @@ class LogSearchResult(BaseModel):
     total_results: int
 
 
+class ChatMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+
+
 class ChatRequest(BaseModel):
     query: str
     include_logs: bool = True
     log_limit: int = Field(20, ge=1, le=200)
     model: str | None = None
+    history: list[ChatMessage] = Field(default_factory=list)
 
 
 class SuggestedAction(BaseModel):

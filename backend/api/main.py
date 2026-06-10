@@ -2,7 +2,6 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from .routes import router
-import os
 
 app = FastAPI(title="AI Homelab Assistant - API")
 app.include_router(router)

@@ -1,6 +1,5 @@
 import logging
 import json
-import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,7 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.approvals.store import ApprovalStore
 from backend.config.settings import get_settings
-from backend.ollama.client import OllamaClient
+from backend.ollama.client import OllamaClient, get_tool_definitions
 from backend.proxmox.client import ProxmoxClient
 from backend.qdrant.snapshots import SnapshotStore
 from backend.loki.client import LokiClient
@@ -277,99 +276,41 @@ def scan_infrastructure():
 def chat(payload: ChatRequest):
     settings = get_settings()
 
-    try:
-        snapshot_store = SnapshotStore(settings)
-        current_infra = snapshot_store.list_current_infrastructure()
-    except Exception as exc:
-        logger.warning(f"Failed to read infrastructure context for chat: {exc}")
-        current_infra = []
-
-    logs_context: list[dict[str, Any]] = []
-    if payload.include_logs:
-        try:
-            log_store = LogStore(settings)
-            logs_context = log_store.get_recent_logs(limit=payload.log_limit)
-        except Exception as exc:
-            logger.warning(f"Failed to read log context for chat: {exc}")
-
-    # Keep context compact to avoid very large prompts.
-    container_context = {
-        "items": current_infra,
-        "brief": build_container_brief(current_infra),
-    }
-
     system_prompt = (
         "You are an on-prem Proxmox homelab DevOps assistant. "
-        "Primary goal: answer the user's query concisely and helpfully. "
-        "Answer using ONLY valid JSON with this schema: "
-        '{"summary": string, "reasoning": string, "confidence": number between 0 and 1, '
-        '"suggested_actions": [{"action": string, "command": string|null, "target": string|null, "risk": "low|medium|high"}]}'
-        " Never claim an action was executed. "
-        "Do not use placeholder syntax like <container_id> in command fields. "
-        "Only include a command when it is directly executable as written; otherwise set command to null and describe the step in action. "
-        "If you determine a concrete action should be performed, do NOT execute it yourself. Instead, emit a top-level \"tool_call\" object with this shape:"
-        " {\"tool_call\": {\"name\": \"<tool-name>\", \"args\": {\"action\": string, \"command\": string|null, \"target\": string|null, \"risk\": \"low|medium|high\"} } } "
-        "If you cannot see any containers or need a refreshed inventory, emit a tool_call with name \"scan_containers\" and no args. "
-        "If you need additional environment context (infrastructure status or recent logs) to decide, emit a tool_call with \"name\": \"request_context\" and args {\"which\": [\"infrastructure\",\"logs\"]}."
-        "The server will provide only the requested context; do not assume it is present unless you asked for it."
+        "You have access to tools that can scan containers, fetch logs, search logs, and manage containers. "
+        "ALWAYS use the relevant tool first when the user asks about containers, VMs, logs, or infrastructure. "
+        "For example, if the user asks about running containers, call scan_containers. "
+        "After you have the tool results, provide a clear and helpful answer. "
+        "When you have all the context you need (after tool results), respond with ONLY a JSON object: "
+        '{"summary": "your answer to the user", "reasoning": "brief reasoning", "confidence": 0.0-1.0, '
+        '"suggested_actions": [{"action": "action description", "command": "executable shell command or null", "target": "container name or null", "risk": "low|medium|high"}]}. '
+        "CRITICAL: The command field must contain a REAL Proxmox/Linux shell command that can be executed on the host. "
+        "Valid commands include: pct list, pct config <vmid>, qm list, qm config <vmid>, pvesh /nodes/<node>/status, "
+        "journalctl -u <service>, systemctl status <service>, ip addr, df -h, free -m, ps aux. "
+        "NEVER put tool names like 'scan_containers' or 'get_logs' in the command field. "
+        "If you cannot provide a real shell command, set command to null."
     )
-    
 
-    # Start with the user's query only. Infrastructure and logs will be
-    # provided only if the model requests them via a `request_context` tool_call.
-    prompt = f"User query:\n{payload.query}\n\n"
+    # Build messages array with system prompt, history, and current query
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    for msg in payload.history:
+        messages.append({"role": msg.role, "content": msg.content})
+    messages.append({"role": "user", "content": payload.query})
 
     try:
         ollama_client = OllamaClient(settings)
-        # allow request to override model
-        if getattr(payload, "model", None):
+        if payload.model:
             ollama_client.model = payload.model
-        # Allow the model to request additional context. If it emits a tool_call
-        # named 'request_context', fetch only the requested parts and retry once.
-        model_result = ollama_client.generate_json(prompt=prompt, system_prompt=system_prompt)
-        if isinstance(model_result, dict) and model_result.get("tool_call"):
-            tc = model_result.get("tool_call") or {}
-            logger.debug("model tool_call (chat): %s", json.dumps(tc))
-            if tc.get("name") == "request_context":
-                which = tc.get("args", {}).get("which", [])
-                if isinstance(which, str):
-                    which = [which]
-                # build requested context
-                additional = ""
-                if "infrastructure" in which:
-                    if not container_context["brief"]:
-                        try:
-                            scan_items, scan_brief, scan_data = fetch_container_scan_context(settings)
-                            container_context["items"] = scan_items
-                            container_context["brief"] = scan_brief
-                            additional += format_container_scan_context(scan_data, scan_brief)
-                        except Exception as scan_exc:
-                            additional += f"Container scan failed: {scan_exc}\n\n"
-                    else:
-                        additional += f"Current infrastructure ({len(container_context['brief'])} items):\n{container_context['brief']}\n\n"
-                if "logs" in which:
-                    try:
-                        log_store = LogStore(settings)
-                        logs = log_store.get_recent_logs(limit=payload.log_limit)
-                    except Exception:
-                        logs = []
-                    additional += f"Recent logs ({len(logs)} items):\n{logs}\n\n"
-                # Retry the call with the additional context appended
-                prompt_with_context = prompt + "\n\nPROVIDED CONTEXT:\n" + additional
-                model_result = ollama_client.generate_json(prompt=prompt_with_context, system_prompt=system_prompt)
-            elif tc.get("name") == "scan_containers":
-                try:
-                    scan_items, scan_brief, scan_data = fetch_container_scan_context(settings)
-                    container_context["items"] = scan_items
-                    container_context["brief"] = scan_brief
-                    prompt_with_context = prompt + "\n\nPROVIDED CONTEXT:\n" + format_container_scan_context(scan_data, scan_brief)
-                except Exception as scan_exc:
-                    prompt_with_context = prompt + f"\n\nPROVIDED CONTEXT:\nContainer scan failed: {scan_exc}\n\n"
-                model_result = ollama_client.generate_json(prompt=prompt_with_context, system_prompt=system_prompt)
+
+        # chat() handles the full tool-calling loop internally:
+        # call LLM -> check tool_calls -> execute tools -> append results -> repeat
+        model_result = ollama_client.chat(messages, get_tool_definitions())
     except Exception as exc:
         logger.error(f"Failed to query Ollama: {exc}")
         raise HTTPException(status_code=500, detail="Failed to generate chat response")
 
+    # Parse suggested_actions from the model result
     raw_actions = model_result.get("suggested_actions", [])
     normalized_actions: list[SuggestedAction] = []
     if isinstance(raw_actions, list):
@@ -402,8 +343,6 @@ def chat(payload: ChatRequest):
         confidence=confidence,
         suggested_actions=normalized_actions,
         context={
-            "infrastructure_count": len(container_context["brief"]),
-            "logs_count": len(logs_context),
             "model": settings.ollama_model,
         },
     )
@@ -413,214 +352,73 @@ def chat(payload: ChatRequest):
 def chat_stream(payload: ChatRequest):
     settings = get_settings()
 
+    # Clean up old executed/rejected approvals so they don't reappear
     try:
-        snapshot_store = SnapshotStore(settings)
-        current_infra = snapshot_store.list_current_infrastructure()
-    except Exception as exc:
-        logger.warning(f"Failed to read infrastructure context for chat: {exc}")
-        current_infra = []
-
-    logs_context: list[dict[str, Any]] = []
-    if payload.include_logs:
-        try:
-            log_store = LogStore(settings)
-            logs_context = log_store.get_recent_logs(limit=payload.log_limit)
-        except Exception as exc:
-            logger.warning(f"Failed to read log context for chat: {exc}")
-
-    container_context = {
-        "items": current_infra,
-        "brief": build_container_brief(current_infra),
-    }
+        with approval_store._lock:
+            with approval_store._conn:
+                approval_store._conn.execute(
+                    "DELETE FROM approvals WHERE status NOT IN ('pending',)"
+                )
+                approval_store._conn.commit()
+    except Exception:
+        pass
 
     system_prompt = (
         "You are an on-prem Proxmox homelab DevOps assistant. "
-        "Answer using ONLY valid JSON with this schema: "
-        '{"summary": string, "reasoning": string, "confidence": number between 0 and 1, '
-        '"suggested_actions": [{"action": string, "command": string|null, "target": string|null, "risk": "low|medium|high"}]}.'
-        "Do not use placeholder syntax like <container_id> in command fields. "
-        "Only include a command when it is directly executable as written; otherwise set command to null and describe the step in action. "
-        "If you emit a tool_call, include action, command, target, and risk in args when available. "
-        "If you cannot see any containers or need a refreshed inventory, emit a tool_call with name \"scan_containers\" and no args. "
+        "You have access to tools that can scan containers, fetch logs, search logs, and manage containers. "
+        "ALWAYS use the relevant tool first when the user asks about containers, VMs, logs, or infrastructure. "
+        "For example, if the user asks about running containers, call scan_containers. "
+        "After you have the tool results, provide a clear and helpful answer. "
+        "When you have all the context you need (after tool results), respond with ONLY a JSON object: "
+        '{"summary": "your answer to the user", "reasoning": "brief reasoning", "confidence": 0.0-1.0, '
+        '"suggested_actions": [{"action": "action description", "command": "executable shell command or null", "target": "container name or null", "risk": "low|medium|high"}]}. '
+        "CRITICAL: The command field must contain a REAL Proxmox/Linux shell command that can be executed on the host. "
+        "Valid commands include: pct list, pct config <vmid>, qm list, qm config <vmid>, pvesh /nodes/<node>/status, "
+        "journalctl -u <service>, systemctl status <service>, ip addr, df -h, free -m, ps aux. "
+        "NEVER put tool names like 'scan_containers' or 'get_logs' in the command field. "
+        "If you cannot provide a real shell command, set command to null."
     )
 
-    prompt = (
-        f"User query:\n{payload.query}\n\n"
-        f"Current infrastructure ({len(container_context['brief'])} items):\n{container_context['brief']}\n\n"
-        f"Recent logs ({len(logs_context)} items):\n{logs_context}\n"
-    )
+    # Build messages array with system prompt, history, and current query
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    for msg in payload.history:
+        messages.append({"role": msg.role, "content": msg.content})
+    messages.append({"role": "user", "content": payload.query})
 
     def generator():
-        full_response = ""
-        streamed_summary = ""
-
-        def to_text(value: Any) -> str:
-            if value is None:
-                return ""
-            if isinstance(value, bytes):
-                return value.decode("utf-8", errors="replace")
-            if isinstance(value, str):
-                return value
-            return str(value)
-
-        def extract_summary_text(text: str) -> str:
-            marker = '"summary"'
-            marker_index = text.find(marker)
-            if marker_index == -1:
-                return ""
-
-            colon_index = text.find(":", marker_index + len(marker))
-            if colon_index == -1:
-                return ""
-
-            value_start = colon_index + 1
-            while value_start < len(text) and text[value_start] in " \t\r\n":
-                value_start += 1
-
-            if value_start >= len(text) or text[value_start] != '"':
-                return ""
-
-            chars: list[str] = []
-            escaped = False
-            for char in text[value_start + 1 :]:
-                if escaped:
-                    if char == "n":
-                        chars.append("\n")
-                    elif char == "t":
-                        chars.append("\t")
-                    elif char == "r":
-                        chars.append("\r")
-                    elif char == '"':
-                        chars.append('"')
-                    elif char == "\\":
-                        chars.append("\\")
-                    else:
-                        chars.append(char)
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    break
-                else:
-                    chars.append(char)
-
-            return "".join(chars)
-
         try:
             ollama_client = OllamaClient(settings)
-            if getattr(payload, "model", None):
+            if payload.model:
                 ollama_client.model = payload.model
-            # We'll stream in a loop so that if the model requests context
-            # (via a `request_context` tool_call) we can fetch the requested
-            # bits and re-invoke the generator with the new prompt.
-            current_prompt = prompt
-            done_streaming = False
-            while not done_streaming:
-                restart_with_context = False
-                for chunk in ollama_client.generate_stream(prompt=current_prompt, system_prompt=system_prompt):
-                    try:
-                        data = json.loads(chunk)
-                    except json.JSONDecodeError:
-                        continue
 
-                    # If the model emits a tool_call, handle it.
-                    if isinstance(data, dict) and data.get("tool_call"):
-                        try:
-                            tc = data.get("tool_call") or {}
-                            logger.debug("model tool_call (stream): %s", json.dumps(tc))
-                            tool_name = tc.get("name")
-                            tool_args = tc.get("args", {})
-                            # Special-case: model asking for context
-                            if tool_name == "request_context":
-                                which = tool_args.get("which", [])
-                                if isinstance(which, str):
-                                    which = [which]
-                                additional = ""
-                                if "infrastructure" in which:
-                                    if not container_context["brief"]:
-                                        try:
-                                            scan_items, scan_brief, scan_data = fetch_container_scan_context(settings)
-                                            container_context["items"] = scan_items
-                                            container_context["brief"] = scan_brief
-                                            additional += format_container_scan_context(scan_data, scan_brief)
-                                        except Exception as scan_exc:
-                                            additional += f"Container scan failed: {scan_exc}\n\n"
-                                    else:
-                                        additional += f"Current infrastructure ({len(container_context['brief'])} items):\n{container_context['brief']}\n\n"
-                                if "logs" in which:
-                                    try:
-                                        log_store = LogStore(settings)
-                                        logs = log_store.get_recent_logs(limit=payload.log_limit)
-                                    except Exception:
-                                        logs = []
-                                    additional += f"Recent logs ({len(logs)} items):\n{logs}\n\n"
-                                # Append requested context and restart streaming with it
-                                current_prompt = current_prompt + "\n\nPROVIDED CONTEXT:\n" + additional
-                                restart_with_context = True
-                                break
-                            if tool_name == "scan_containers":
-                                try:
-                                    scan_items, scan_brief, scan_data = fetch_container_scan_context(settings)
-                                    container_context["items"] = scan_items
-                                    container_context["brief"] = scan_brief
-                                    current_prompt = current_prompt + "\n\nPROVIDED CONTEXT:\n" + format_container_scan_context(scan_data, scan_brief)
-                                except Exception as scan_exc:
-                                    current_prompt = current_prompt + f"\n\nPROVIDED CONTEXT:\nContainer scan failed: {scan_exc}\n\n"
-                                restart_with_context = True
-                                break
-                            else:
-                                # Forward other tool_calls to the client UI
-                                yield json.dumps({"type": "tool_call", "tool": tool_name, "args": tool_args}) + "\n"
-                                continue
-                        except Exception:
-                            yield json.dumps({"type": "error", "error": "malformed tool_call"}) + "\n"
-                            continue
+            # Show thinking indicator while the model processes
+            yield json.dumps({"type": "chunk", "text": "Thinking..."}) + "\n"
 
-                    response_piece = data.get("response", "")
-                    piece = to_text(response_piece)
-                    if piece:
-                        full_response += piece
-                        parsed_summary = extract_summary_text(full_response)
-                        if parsed_summary:
-                            new_text = parsed_summary[len(streamed_summary) :]
-                            if new_text:
-                                streamed_summary = parsed_summary
-                                yield json.dumps({"type": "chunk", "text": new_text}) + "\n"
+            # Use client.chat() which handles the full tool-calling loop
+            # internally: call LLM -> check tool_calls -> execute -> repeat
+            model_result = ollama_client.chat(messages, get_tool_definitions())
 
-                    if data.get("done"):
-                        done_streaming = True
-                        break
+            # Stream the final answer summary character by character
+            summary = model_result.get("summary", "")
+            if summary:
+                for char in summary:
+                    yield json.dumps({"type": "chunk", "text": char}) + "\n"
 
-                if restart_with_context:
-                    # continue the outer while loop which will re-run the stream
-                    continue
-
-            final_payload: dict[str, Any]
-            try:
-                parsed = json.loads(full_response)
-                final_payload = parsed if isinstance(parsed, dict) else {"summary": full_response}
-            except json.JSONDecodeError:
-                final_payload = {
-                    "summary": full_response or "No summary available.",
-                    "reasoning": "Model did not return valid JSON; using streamed text fallback.",
-                    "confidence": 0.0,
-                    "suggested_actions": [],
-                }
-            # Emit tool_call events for suggested_actions so the UI can create approvals
-            for action in final_payload.get("suggested_actions", []):
-                if isinstance(action, dict) and action.get("action"):
-                    tc = {
+            # Emit any suggested_actions as tool_call events for the UI
+            for action in model_result.get("suggested_actions", []):
+                if isinstance(action, dict) and action.get("command"):
+                    yield json.dumps({
+                        "type": "tool_call",
                         "tool": "execute",
                         "args": {
-                            "action": action.get("action", ""),
-                            "command": action.get("command"),
+                            "action": action.get("action", "command"),
+                            "command": action.get("command", ""),
                             "target": action.get("target"),
                             "risk": action.get("risk", "medium"),
                         },
-                    }
-                    yield json.dumps({"type": "tool_call", **tc}) + "\n"
+                    }) + "\n"
 
-            yield json.dumps({"type": "final", "payload": final_payload}) + "\n"
+            yield json.dumps({"type": "final", "payload": model_result}) + "\n"
         except Exception as exc:
             logger.error(f"Streaming failed: {exc}")
             yield json.dumps({"type": "error", "error": str(exc)}) + "\n"
@@ -955,7 +753,7 @@ def execute_command(request: ExecuteRequest):
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as exc:
         logger.error(f"Execution failed: {exc}")
-        raise HTTPException(status_code=500, detail="Execution failed")
+        raise HTTPException(status_code=500, detail=f"Execution failed: {exc}")
 
 
 @router.post("/execute/direct", response_model=ExecutionResult)
@@ -986,7 +784,7 @@ def execute_direct(request: ExecuteRequest):
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as exc:
         logger.error(f"Direct execution failed: {exc}")
-        raise HTTPException(status_code=500, detail="Direct execution failed")
+        raise HTTPException(status_code=500, detail=f"Direct execution failed: {exc}")
 
 
 @router.get("/settings", response_model=SettingsResponse)
@@ -1115,64 +913,4 @@ def _write_env_file(path: Path, env: dict[str, str]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-@router.get("/settings", response_model=SettingsResponse)
-def get_current_settings():
-    """Return current non-sensitive configuration."""
-    s = get_settings()
-    return SettingsResponse(
-        app_env=s.app_env,
-        app_host=s.app_host,
-        app_port=s.app_port,
-        proxmox_url=s.proxmox_url,
-        proxmox_host_ip=s.proxmox_host_ip,
-        proxmox_ip=s.proxmox_ip,
-        proxmox_node=s.proxmox_node,
-        proxmox_port=s.proxmox_port,
-        proxmox_realm=s.proxmox_realm,
-        proxmox_user=s.proxmox_user,
-        proxmox_token_id=s.proxmox_token_id,
-        proxmox_verify_ssl=s.proxmox_verify_ssl,
-        qdrant_url=s.qdrant_url,
-        qdrant_api_key=s.qdrant_api_key,
-        qdrant_current_collection_name=s.qdrant_current_collection_name,
-        qdrant_history_collection_name=s.qdrant_history_collection_name,
-        ollama_url=s.ollama_url,
-        ollama_model=s.ollama_model,
-        loki_url=s.loki_url,
-        prometheus_url=s.prometheus_url,
-        approval_db_path=s.approval_db_path,
-    )
 
-
-@router.patch("/settings", response_model=SettingsSavedResponse)
-def update_settings(payload: SettingsUpdateRequest):
-    """Update .env file with provided values. Changes apply immediately to current process."""
-    project_root = Path(__file__).resolve().parents[2]
-    env_path = project_root / ".env"
-
-    # Read current .env
-    env = _read_env_file(env_path)
-
-    updated_fields: list[str] = []
-    for field_name, value in payload.model_dump(exclude_none=True).items():
-        env_key = _ENV_VAR_MAP.get(field_name)
-        if env_key is None:
-            continue
-        str_value = str(value) if not isinstance(value, bool) else str(value).lower()
-        env[env_key] = str_value
-        # Also update os.environ so current process sees the change
-        os.environ[env_key] = str_value
-        updated_fields.append(field_name)
-
-    if not updated_fields:
-        return SettingsSavedResponse(saved=False, message="No fields provided to update.")
-
-    _write_env_file(env_path, env)
-
-    # Clear the settings cache so get_settings() returns fresh values
-    get_settings.cache_clear()
-
-    return SettingsSavedResponse(
-        saved=True,
-        message=f"Updated {len(updated_fields)} field(s): {', '.join(updated_fields)}. Changes applied immediately.",
-    )
