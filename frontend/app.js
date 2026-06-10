@@ -238,10 +238,13 @@ async function streamChatQuery(query) {
     thinkingLines.push(`[Reasoning] ${reasoning}`);
     thinkingBody.textContent = thinkingLines.join('\n\n');
   }
-  thinkingSummary.textContent = reasoning
-    ? `💭 ${reasoning.substring(0, 80)}${reasoning.length > 80 ? '…' : ''} (click to expand)`
-    : (thinkingLines.length > 0 ? `💭 Thought for a moment (click to expand)` : '');
-
+  if (reasoning || thinkingLines.length > 0) {
+    thinkingSummary.textContent = reasoning
+      ? `💭 ${reasoning.substring(0, 80)}${reasoning.length > 80 ? '…' : ''} (click to expand)`
+      : `💭 Thought for a moment (click to expand)`;
+  } else {
+    thinkingPanel.remove();
+  }
   if (!finalPayload) {
     finalPayload = { summary: rawResponseText, reasoning: '', confidence: 0.0, suggested_actions: [] };
   }

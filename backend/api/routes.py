@@ -378,6 +378,7 @@ def chat_stream(payload: ChatRequest):
         "Valid commands include: pct list, pct config <vmid>, pct start <vmid>, qm list, qm config <vmid>, qm start <vmid>, pvesh /nodes/<node>/status, "
         "journalctl -u <service>, systemctl status <service>, ip addr, df -h, free -m, ps aux. "
         "IMPORTANT: When executing Proxmox commands like pct or qm, you MUST use the numeric `vmid` (e.g. 101, 102), NOT the human-readable name! "
+        "CRITICAL: You MUST ONLY output a MAXIMUM of ONE suggested action per response! Do NOT queue up multiple commands at once. If you need to perform multiple steps, propose the first command, wait for its output to be returned to you, and then propose the next command in your subsequent response. "
         "NEVER put tool names like 'scan_containers' or 'get_logs' in the command field. "
         "If you cannot provide a real shell command, set command to null."
     )
